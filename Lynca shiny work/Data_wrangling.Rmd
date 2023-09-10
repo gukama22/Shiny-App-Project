@@ -1,0 +1,228 @@
+---
+title: ""
+subtitle: "SAT 231: Project 2 _Shiny_App"
+author: "Lynca Jones Kaminka"
+date: "\\today"
+output: pdf_document
+---
+```{r setup, include = FALSE}
+# set code chunk option defaults
+knitr::opts_chunk$set(
+  # display code as types
+  tidy = FALSE, 
+  # slightly smaller code font
+  size = "small",
+  # do not display messages in PDF
+  message = FALSE,
+  # set default figure width and height
+  fig.width = 5, fig.height = 3) 
+
+# improve digit and NA display 
+options(scipen = 1, knitr.kable.NA = '')
+
+# load packages
+library(shiny)
+library(shinythemes)
+#library(tidyquant)
+library(tidyverse)
+library(tidyr)
+library(ical)
+library(lubridate)
+library(kableExtra)
+library(dplyr) #for inner join, renaming columns, #rounding
+library(DT)
+library(ggrepel)
+library(tidytuesdayR)
+library(plotly)#hovering
+library(shinythemes)
+library(stringi)
+library(ggthemes)
+library(ggthemes)
+library(gridExtra) ##beautifying the graph ~ rotating the labels.
+library(knitr)
+library(ggplot2)
+library(RMariaDB)
+library(lubridate)
+
+# help with extracting the right data frames from xlsx
+library(expss)
+library(openxlsx)
+library(readxl)
+
+```
+
+
+```{r}
+
+#first data frame
+county_weekly <- read_xlsx("data/covid-19-raw-data-3-16-2023.xlsx", sheet = "County_Weekly")
+
+#second data frame: 
+city_df <-  read_xlsx("data/covid-19-raw-data-3-16-2023.xlsx", sheet = "Weekly_City_Town")
+
+
+########Data Wrangling:
+
+# removing some bogus observations and variables that I don't need and restricting the time period to two years; 2021 and 2022. 
+county_weekly_2 <- county_weekly %>%
+  select(!("...15" | "...16" | "...17" | "Percent Positivity (Last 14 days)" | "Start Date" | "End Date"))%>%
+  separate("Report Date", into = c("ReportYear", "ReportMonth", "ReportDay"), sep = "-", convert=FALSE) %>%
+  filter(ReportYear%in%c(2021,2022))%>%
+
+  #renaming columns with long names.
+  rename( "County Case Count" = "Case Count (Last 14 Days)", 
+          "County Daily Average Incidence Rate " = "Average Daily Incidence Rate per 100,000 (Last 14 days)", 
+          "County Total Tests" = "Total Tests (Last 14 days)",                             
+          "Total Positive Tests" = "Total Positive Tests (Last 14 days)")%>%
+  filter("County" != "All of Massachusetts")%>%
+  select(!("County Daily Average Incidence Rate "))
+
+
+ 
+#removing rows with missing values
+county_weekly_3 <- na.omit(county_weekly_2)
+
+
+#Removing columns that don't contain quantifiable data and columns that offers information on the counts biweekly instead of monthly, and removing the data about all of Massachusets.
+county_weekly_4 <- county_weekly_3 %>%
+  select(!("Relative Change in Case Counts"))%>%
+  select(!("Change in Percent Positivity"))%>%
+  filter(County != "All of Massachusetts")
+  
+  #renaming the columns. 
+colnames(county_weekly_4)<- c("ReportYear", "ReportMonth", "ReportDay", "County", "Total_Case_Counts", "County_Case_Counts", "Total_Tests", "County_Total_Tests", "Total_Positive_Tests", "Deaths_Last_2_Weeks" )
+
+
+
+#the original information was biweekly, therefore, we need to ge the total for each month. 
+county_monthly_5 <- county_weekly_4 %>%
+  mutate(ReportMonth = as.numeric(ReportMonth))%>%
+  mutate(ReportYear = as.numeric(ReportYear))%>%
+  mutate(ReportDay = as.numeric(ReportDay))
+
+#convert the day into a date variable so that we have access to it in the app.   
+county_monthly_5 <- county_monthly_5 %>%
+  mutate(date = make_date(year = county_monthly_5$ReportYear,
+                          month = county_monthly_5$ReportMonth,
+                          day = county_monthly_5$ReportDay))
+
+#extracting the population size for each city from the city_df_data table, and use it for teh . 
+county_df_populatoin <- city_df %>%
+  select("City/Town" | "County" | "Population")
+
+
+#adding up all the population size for the towns in the same county so as to obtain the population per county.
+county_df_population <- city_df_population %>%
+  group_by (County) %>%
+  summarize(
+    Population_county = sum(Population)
+  ) %>%
+  filter (!(County == "Unknown"))
+
+
+#standardizing the naming of the columns for the population counts, this will allow us to fastly add the columns.
+county_df_pop_2 <- county_df_population %>%
+  mutate(County = case_when(County == "Dukes" | County == "Nantucket" 
+                            ~ "Dukes and Nantucket Counties",
+                            TRUE ~ paste(County, "County")))%>%
+  group_by (County)%>%
+  summarize(Population_county = sum(Population_county))
+
+  #adding the size of the population as an observation.
+county_monthly_6 <- county_monthly_5 %>%
+  full_join(county_df_pop_2, by = c ("County" = "County" ))
+
+#Converting the preexisting observation to per capita observations, and keeping the right amount of digit;: 
+county_monthly_7 <- county_monthly_6 %>%
+  mutate(PerCapita_New_Case_Counts = (County_Case_Counts/Population_county)*100000) %>%
+  mutate(PerCapita_New_Total_Tests= ( County_Total_Tests/Population_county*100000)) %>%
+  mutate(PerCapita_New_Positive_Tests = ( Total_Positive_Tests /Population_county*100000)) %>%
+  mutate( PerCapita_Deaths_Last_2_Weeks= ( Deaths_Last_2_Weeks/Population_county*100000))%>%
+  mutate (Total_Tests =  County_Total_Tests)
+ 
+#except for the total number of tests. 
+
+
+#rounding the stats. 
+county_monthly_8 <- county_monthly_7 %>%
+  mutate_if(is.numeric, round, digits = 2)
+
+
+#removing the observations as counts. 
+county_monthly_9 <- county_monthly_8 %>%
+  select(!("County_Case_Counts" |   "County_Total_Tests" | "Total_Positive_Tests" | "Deaths_Last_2_Weeks" | "Population_county"))%>%
+  filter(!(County == "Unknown County"))
+
+#removing rows with missing data: 
+county_monthly_10 <- na.omit(county_monthly_9) 
+
+############second dataframe
+
+
+#keeping the rows who regroup observations from 2021 and 2022. And Removing unwanted time specifications. 
+city_df_1 <- city_df %>%
+  separate("Report Date", into = c("ReportYear", "ReportMonth", "ReportDay"), sep = "-", convert=FALSE) %>%
+  filter(ReportYear%in%c(2021,2022))%>%
+  select(!( "Start_Date" |"End_Date" | Color))
+
+#removing rows with missing values
+city_df_2 <- na.omit(city_df_1)
+
+
+#removing columns that we won't be using or who wold non quantitative values.. 
+city_df_3 <- city_df_2 %>%
+  select(!("Two Week Case Counts"))%>%
+  select(!("Change in Last Week"))%>%
+  select(!("Total Tests Last Two Weeks"))%>%
+  select(!("Change Since Last Week"))%>%
+  select(!("Total Tests")) %>%
+  select(!("Percent Positivity"))%>%
+  rename(Town = "City/Town") 
+
+
+#reformatting the name of the columns, so as to make it easier to refer to them. 
+ colnames(city_df_3) <- gsub(" ", "", colnames(city_df_3))
+ 
+ 
+
+#type conversion for numeric variables (because for some reason they are interpreted as character values).
+ city_df_4 <- city_df_3 %>%
+   mutate(ReportMonth = as.numeric(ReportMonth))%>%
+   mutate(ReportYear = as.numeric(ReportYear)) %>%
+   mutate(ReportDay = as.numeric(ReportDay))%>%
+   mutate(TotalCaseCounts = as.numeric(TotalCaseCounts))%>%
+   mutate(AverageDailyRate = as.numeric(AverageDailyRate))%>%
+   mutate(TestingRate = as.numeric(TestingRate)) 
+
+ 
+#removing rows with missing data.
+ city_df_5 <- na.omit(city_df_4)
+   
+
+#converting the date into a date variable. 
+ city_df_6 <- city_df_5 %>%
+    mutate(date = make_date(year = city_df_5$ReportYear,
+                          month = city_df_5$ReportMonth,
+                          day = city_df_5$ReportDay))
+ 
+
+ #PerCapitaCounts
+city_df_7 <- city_df_6 %>%
+  mutate(PerCapita_Case_Counts = ((TotalCaseCounts / Population)*10000))%>%
+  select(!("TotalCaseCounts"))
+ 
+#View(county_monthly_10)
+#View(city_df_7)
+
+#names(county_monthly_10)
+names(city_df_7)
+#saving the data frames in  RDS files.
+saveRDS(city_df_7, file = "data/city_df_final.rds")
+saveRDS(county_monthly_10, file = "data/county_yearly.rds")
+#saveRDS(county_monthly_10, file = "data/county_monthly_data.rds")
+
+
+
+```
+
+
